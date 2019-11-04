@@ -111,11 +111,6 @@ $KIE_SERVER_CONTROLLER_PWD="kieserver1!"
 $KIE_SERVER_USER="kieserver"
 $KIE_SERVER_PWD="kieserver1!"
 
-#OpenShift Template Parameters
-#GitHub tag referencing the image streams and templates.
-$OPENSHIFT_PAM7_TEMPLATES_TAG="rhpam70"
-
-
 ################################################################################
 # DEMO MATRIX                                                                  #
 ################################################################################
@@ -219,17 +214,40 @@ Function Create-Projects() {
 
 Function Import-ImageStreams-And-Templates() {
   Write-Output-Header "Importing Image Streams"
-  Call-Oc "create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/rhpam70-image-streams.yaml" $True "Error importing Image Streams" $True
+  Call-Oc "create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/rhpam$PAM7_VERSION-image-streams.yaml" $True "Error importing Image Streams" $True
+
+  Write-Output ""
+  Write-Output "Fetching ImageStreams from registry."
+
+  Start-Sleep -s 10
+
+  #  Explicitly import the images. This is to overcome a problem where the image import gets a 500 error from registry.redhat.io when we deploy multiple containers at once.
+  Call-Oc "import-image rhpam-businesscentral-rhel8:$IMAGE_STREAM_TAG —confirm -n $($PRJ[0])" $True "Error fetching Image Streams."
+  Call-Oc "import-image rhpam-kieserver-rhel8:$IMAGE_STREAM_TAG —confirm -n $($PRJ[0])" $True "Error fetching Image Streams."
 
   Write-Output-Header "Importing Templates"
-  Call-Oc "create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/templates/rhpam70-authoring.yaml" $True "Error importing Template" $True
-  Call-Oc "create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/templates/rhpam70-kieserver-externaldb.yaml" $True "Error importing Template" $True
-  Call-Oc "create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/templates/rhpam70-kieserver-mysql.yaml" $True "Error importing Template" $True
-  Call-Oc "create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/templates/rhpam70-kieserver-postgresql.yaml" $True "Error importing Template" $True
-  Call-Oc "create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/templates/rhpam70-prod-immutable-kieserver.yaml" $True "Error importing Template" $True
-  Call-Oc "create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/templates/rhpam70-prod-immutable-monitor.yaml" $True "Error importing Template" $True
-  Call-Oc "create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/templates/rhpam70-sit.yaml" $True "Error importing Template" $True
-  Call-Oc "create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/templates/rhpam70-trial-ephemeral.yaml" $True "Error importing Template" $True
+  Call-Oc "create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/templates/rhpam$PAM7_VERSION-authoring.yaml" $True "Error importing Template" $True
+}
+}
+
+Function Create-Rhn-Secret-For-Pull() {
+
+  Write-Output ""
+  Write-Output "########################################## Login Required ##########################################"
+  Write-Output "# The new Red Hat Image Registry requires users to login with their Red Hat Network (RHN) account. #"
+  Write-Output "# If you do not have an RHN account yet, you can create one at https://developers.redhat.com       #"
+  Write-Output "####################################################################################################"
+  Write-Output ""
+
+  $RHN_USERNAME = Read-Host "Enter RHN username"
+  $RHN_PASSWORD_SECURED = Read-Host "Enter RHN password" -AsSecureString
+  $RHN_EMAIL = Read-Host "Enter e-mail address"
+
+  $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($RHN_PASSWORD_SECURED)
+  $RHN_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+
+  oc create secret docker-registry red-hat-container-registry --docker-server=registry.redhat.io --docker-username=$RHN_USERNAME --docker-password=$RHN_PASSWORD --docker-email=$RHN_EMAIL
+  oc secrets link builder red-hat-container-registry --for=pull
 }
 
 Function Import-Secrets-And-Service-Account() {
@@ -254,10 +272,10 @@ Function Create-Application() {
 
   oc create configmap setup-demo-scripts --from-file=$SCRIPT_DIR/bc-clone-git-repository.sh
 
-  $argList = "new-app --template=rhpam70-authoring"`
+  $argList = "new-app --template=rhpam$PAM7_VERSION-authoring"`
       + " -p APPLICATION_NAME=""$ARG_DEMO""" `
       + " -p IMAGE_STREAM_NAMESPACE=""$IMAGE_STREAM_NAMESPACE""" `
-      + " -p IMAGE_STREAM_TAG=""1.0""" `
+      + " -p IMAGE_STREAM_TAG=""$IMAGE_STREAM_TAG""" `
       + " -p KIE_ADMIN_USER=""$KIE_ADMIN_USER""" `
       + " -p KIE_ADMIN_PWD=""$KIE_ADMIN_PWD""" `
       + " -p KIE_SERVER_CONTROLLER_USER=""$KIE_SERVER_CONTROLLER_USER""" `
@@ -269,6 +287,10 @@ Function Create-Application() {
       + " -p BUSINESS_CENTRAL_MEMORY_LIMIT=""2Gi"""
 
   Call-Oc $argList $True "Error creating application." $True
+
+  # Disable the OpenShift Startup Strategy and revert to the old Controller Strategy
+  oc set env dc/$ARG_DEMO-rhpamcentr KIE_WORKBENCH_CONTROLLER_OPENSHIFT_ENABLED=false
+  oc set env dc/$ARG_DEMO-kieserver KIE_SERVER_STARTUP_STRATEGY=ControllerBasedStartupStrategy KIE_SERVER_CONTROLLER_USER=$KIE_SERVER_CONTROLLER_USER KIE_SERVER_CONTROLLER_PWD=$KIE_SERVER_CONTROLLER_PWD KIE_SERVER_CONTROLLER_SERVICE=$ARG_DEMO-rhpamcentr KIE_SERVER_CONTROLLER_PROTOCOL=ws KIE_SERVER_ROUTE_NAME=insecure-$ARG_DEMO-kieserver
 
   # Give the system some time to create the DC, etc. before we trigger a deployment config change.
   Start-Sleep -s 5
@@ -421,7 +443,7 @@ switch ( $ARG_COMMAND )
     Print-Info
     #Pre-Condition-Check
     Create-Projects
-
+    Create-Rhn-Secret-For-Pull
     if ($ARG_WITH_IMAGESTREAMS) {
       Import-ImageStreams-And-Templates
     }

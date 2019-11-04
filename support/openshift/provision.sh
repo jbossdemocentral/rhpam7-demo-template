@@ -168,11 +168,6 @@ KIE_SERVER_CONTROLLER_PWD=kieserver1!
 KIE_SERVER_USER=kieserver
 KIE_SERVER_PWD=kieserver1!
 
-#OpenShift Template Parameters
-#GitHub tag referencing the image streams and templates.
-OPENSHIFT_PAM7_TEMPLATES_TAG=rhpam70
-
-
 ################################################################################
 # DEMO MATRIX                                                                  #
 ################################################################################
@@ -249,17 +244,61 @@ function create_projects() {
 
 function import_imagestreams_and_templates() {
   echo_header "Importing Image Streams"
-  oc create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/rhpam70-image-streams.yaml
+  oc create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/rhpam$PAM7_VERSION-image-streams.yaml
+
+  echo ""
+  echo "Fetching ImageStreams from registry."
+  #Instead of sleeping 10 seconds, run a little annimation for 10 seconds
+  runSpinner 10
+
+  #  Explicitly import the images. This is to overcome a problem where the image import gets a 500 error from registry.redhat.io when we deploy multiple containers at once.
+  oc import-image rhpam-businesscentral-rhel8:$IMAGE_STREAM_TAG —confirm -n ${PRJ[0]}
+  oc import-image rhpam-kieserver-rhel8:$IMAGE_STREAM_TAG —confirm -n ${PRJ[0]}
 
   echo_header "Importing Templates"
-  oc create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/templates/rhpam70-authoring.yaml
-  oc create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/templates/rhpam70-kieserver-externaldb.yaml
-  oc create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/templates/rhpam70-kieserver-mysql.yaml
-  oc create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/templates/rhpam70-kieserver-postgresql.yaml
-  oc create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/templates/rhpam70-prod-immutable-kieserver.yaml
-  oc create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/templates/rhpam70-prod-immutable-monitor.yaml
-  oc create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/templates/rhpam70-sit.yaml
-  oc create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/templates/rhpam70-trial-ephemeral.yaml
+  oc create -f https://raw.githubusercontent.com/jboss-container-images/rhpam-7-openshift-image/$OPENSHIFT_PAM7_TEMPLATES_TAG/templates/rhpam$PAM7_VERSION-authoring.yaml
+}
+
+#Runs a spinner for the time passed to the function.
+function runSpinner() {
+  sleeptime=0.5
+  maxCount=$( bc <<< "$1 / $sleeptime")
+  counter=0
+  i=1
+  sp="/-\|"
+  while [ $counter -lt $maxCount ]
+  do
+    printf "\b${sp:i++%${#sp}:1}"
+    sleep $sleeptime
+    let counter=counter+1
+  done
+}
+
+function createRhnSecretForPull() {
+
+  echo ""
+  echo "########################################## Login Required ##########################################"
+  echo "# The new Red Hat Image Registry requires users to login with their Red Hat Network (RHN) account. #"
+  echo "# If you do not have an RHN account yet, you can create one at https://developers.redhat.com       #"
+  echo "####################################################################################################"
+  echo ""
+
+  echo "Enter RHN username:"
+  read RHN_USERNAME
+
+  echo "Enter RHN password:"
+  read -s RHN_PASSWORD
+
+  echo "Enter e-mail address:"
+  read RHN_EMAIL
+
+  oc create secret docker-registry red-hat-container-registry \
+    --docker-server=registry.redhat.io \
+    --docker-username="$RHN_USERNAME" \
+    --docker-password="$RHN_PASSWORD" \
+    --docker-email="$RHN_EMAIL"
+
+    oc secrets link builder red-hat-container-registry --for=pull
 }
 
 
@@ -285,10 +324,10 @@ function create_application() {
 
   oc create configmap setup-demo-scripts --from-file=$SCRIPT_DIR/bc-clone-git-repository.sh
 
-  oc new-app --template=rhpam70-authoring \
+  oc new-app --template=rhpam$PAM7_VERSION-authoring \
   -p APPLICATION_NAME="$ARG_DEMO" \
   -p IMAGE_STREAM_NAMESPACE="$IMAGE_STREAM_NAMESPACE" \
-  -p IMAGE_STREAM_TAG="1.0" \
+  -p IMAGE_STREAM_TAG="$IMAGE_STREAM_TAG" \
   -p KIE_ADMIN_USER="$KIE_ADMIN_USER" \
   -p KIE_ADMIN_PWD="$KIE_ADMIN_PWD" \
   -p KIE_SERVER_CONTROLLER_USER="$KIE_SERVER_CONTROLLER_USER" \
@@ -298,6 +337,10 @@ function create_application() {
   -p BUSINESS_CENTRAL_HTTPS_SECRET="businesscentral-app-secret" \
   -p KIE_SERVER_HTTPS_SECRET="kieserver-app-secret" \
   -p BUSINESS_CENTRAL_MEMORY_LIMIT="2Gi"
+
+  # Disable the OpenShift Startup Strategy and revert to the old Controller Strategy
+  oc set env dc/$ARG_DEMO-rhpamcentr KIE_WORKBENCH_CONTROLLER_OPENSHIFT_ENABLED=false
+  oc set env dc/$ARG_DEMO-kieserver KIE_SERVER_STARTUP_STRATEGY=ControllerBasedStartupStrategy KIE_SERVER_CONTROLLER_USER=$KIE_SERVER_CONTROLLER_USER KIE_SERVER_CONTROLLER_PWD=$KIE_SERVER_CONTROLLER_PWD KIE_SERVER_CONTROLLER_SERVICE=$ARG_DEMO-rhpamcentr KIE_SERVER_CONTROLLER_PROTOCOL=ws KIE_SERVER_ROUTE_NAME=insecure-$ARG_DEMO-kieserver
 
   # Give the system some time to create the DC, etc. before we trigger a deployment config change.
   sleep 5
@@ -418,6 +461,7 @@ case "$ARG_COMMAND" in
         print_info
         #pre_condition_check
         create_projects
+        createRhnSecretForPull
         if [ "$ARG_WITH_IMAGESTREAMS" = true ] ; then
            import_imagestreams_and_templates
         fi
